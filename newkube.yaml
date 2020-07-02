@@ -1,0 +1,205 @@
+---
+- hosts: kubernetes
+  remote_user: ansible
+  become: yes
+  tasks:
+   - name: Bridge
+     copy:
+       dest: /etc/sysctl.d/master.conf
+       content: "net.bridge.bridge-nf-call-iptables = 1"
+
+   - name: selinux off temp
+     shell: setenforce 0
+
+   - name: selinux off perm
+     shell: sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/sysconfig/selinux
+
+   - name: firewall off
+     become: yes
+     service:
+        name: firewalld
+        state: stopped
+        enabled: no
+         
+
+   - name: Disable swap
+     command: swapoff -a
+
+   - name: Disable SWAP in fstab
+     lineinfile:
+       path: /etc/fstab
+       regexp: 'swap'
+       state: absent
+
+   - name: yum timeout
+     lineinfile:
+       state: present
+       path: /etc/yum.conf
+       line: "timeout=280"
+
+   - name: add Kubernetes YUM repository
+     yum_repository:
+       name: Kubernetes
+       description: Kubernetes YUM repository
+       baseurl: https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+       gpgkey: https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+       gpgcheck: yes
+
+
+   - name: Remove old Docker version
+     yum:
+       name: docker
+       state: removed
+
+   - name: add Docker YUM repository
+     yum_repository:
+      name: Docker
+      description: Docker YUM repository
+      baseurl: https://download.docker.com/linux/centos/7/$basearch/stable
+      gpgkey: https://download.docker.com/linux/centos/gpg
+
+
+   - name: sysctl --system
+     shell:
+       cmd: "sysctl --system"
+
+
+   - name: install Docker
+     yum:
+       name: docker-ce
+       state: latest
+       update_cache: true
+
+
+   - name: install kubeadm
+     yum:
+        name: kubeadm
+        state: present
+
+
+   - name: install kubelet
+     yum:
+        name: kubelet
+        state: latest
+        update_cache: true
+
+   - name: install kubectl
+     yum:
+        name: kubectl
+        state: present
+        allow_downgrade: yes
+
+   - name: start Docker
+     service:
+       name: docker
+       state: started
+       enabled: true
+
+
+   - name: start kubelet
+     service:
+       name: kubelet
+       enabled: yes
+       state: started
+
+   - name: sysctl --system
+     shell:
+       cmd: "sysctl --system"
+
+
+
+- name: Master01
+  hosts: kubem1
+  remote_user: ansible
+  tasks:
+   - name: INIT
+     become: yes
+     shell: kubeadm init --pod-network-cidr=10.244.0.0/16 --control-plane-endpoint "192.168.1.222:6443" --upload-certs >> token
+
+
+   - name: Storing Logs and Generated token for future purpose.
+     become: yes
+     fetch:
+       src: /home/ansible/token
+       dest: /home/ansible/
+       flat: yes
+
+
+   - name: Create /.kube directory
+     become: yes
+     file:
+       path: /home/ansible/.kube
+       state: directory
+       mode: 0755
+       owner: ansible
+       group: ansible
+
+   - name: Kube config file
+     become: yes
+     copy:
+         dest: /home/ansible/.kube/config
+         src: /etc/kubernetes/admin.conf
+         owner: ansible
+         group: ansible
+         remote_src: yes
+
+
+   - name: install Pod network
+     shell: kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"   ######weave
+
+
+- name: Master02
+  hosts: kubem2
+  remote_user: ansible
+  tasks:
+   - name: Copying token to nodes
+     become: yes
+     copy:
+       src=/home/ansible/token
+       dest=/home/ansible/token.txt
+
+   - name: Join second control plane node to cluster
+     become: yes
+     shell: |
+      cat token.txt | grep -B 2 "control-plane --certificate-key" > out.sh
+      chmod +x out.sh
+      sh out.sh
+   
+
+   - name: Create /.kube directory
+     become: yes
+     file:
+       path: /home/ansible/.kube
+       state: directory
+       mode: 0755
+       owner: ansible
+       group: ansible
+
+   - name: Kube config file
+     become: yes
+     copy:
+         dest: /home/ansible/.kube/config
+         src: /etc/kubernetes/admin.conf
+         owner: ansible
+         group: ansible
+         remote_src: yes
+
+
+
+- name: Worker
+  hosts: kubew
+  become: yes
+  remote_user: ansible
+  tasks:
+   - name: Copying token to worker nodes
+     copy:
+       src=/home/ansible/token
+       dest=/home/ansible/token.txt
+
+
+   - name: Joining worker nodes with kubernetes master
+     shell: |
+      kubeadm reset -f
+      cat /home/ansible/token.txt | tail -2 > out.sh
+      chmod +x out.sh
+      sh out.sh
